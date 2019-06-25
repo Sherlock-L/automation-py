@@ -223,7 +223,7 @@ class Switch :
 
 
 """
-命令实例  ./brocade_fs_query.py  ip=192.168.1.1  username=xx  pwd=xxx  opList=switchshow
+命令实例   ./brocade_fs_query.py  ip=192.168.1.1  username=xx  pwd=xxx  opList=switchshow
 这里opList 的值是逗号分隔的字符串，值是对应的函数名，便于以后扩展，实现非全量查询，因为可能只是获取部分信息
 """
 if __name__ == '__main__':
