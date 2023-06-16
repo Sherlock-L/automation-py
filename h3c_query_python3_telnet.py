@@ -16,15 +16,18 @@ class H3C:
 
     data={
         'hostname':None,
+        'crc_list':{},
         'os_version':None,
         'port_list':{},
         'logic_port_list':{},
         'composed_logic_port':{},
         'port_vlan_list':{},
         'device_list':{},
-        'port_connect_mac_list':{},
+        'port_connect_mac_list':[],
+        'arp_list':[],
+        'lldp_neighbor_info_list':{},
     }
-
+    init_log_done=False
     client=None
     transport=None
     username=''
@@ -32,9 +35,9 @@ class H3C:
     funcName=''
     password = ''
     port = ''
-
+    prompt = ''
     def recordLog(self,txt):
-      
+      if self.init_log_done:
         logging.info(txt)           
         # cmd =  "echo \'{0}\' >>{1} ".format(txt,self.exeLog)
         # handle = os.popen(cmd)
@@ -81,9 +84,10 @@ class H3C:
             'ip': self.ip,
             'username': self.username,
             'password': self.password,
-            'port': self.port,  # Telnet 端口
+            'port': self.port,   
          }
         self.client = ConnectHandler(**device)
+        self.prompt = self.client.find_prompt() 
 
 
     def closeClient(self):
@@ -110,7 +114,7 @@ class H3C:
                   "model":device_name,
                   "chassis_num":chassis_number,
                 }
-        else:
+        elif 'PRODUCT' in retText:
             regex = r'Slot\s+(\d+)\s+CPU\s+0:[\s\S]+?DEVICE_SERIAL_NUMBER\s+:\s+([\w\d]+)[\s\S]+?VENDOR_NAME\s+:\s+([\w\d-]+)[\s\S]+?PRODUCT ID\s+:\s+([\w\d-]+)'
             matches = re.findall(regex, retText)
             for match in matches:
@@ -121,29 +125,42 @@ class H3C:
                     "model":match[3],
                    "chassis_num":-1,
                 }
+        else:
+            regex = r'Slot\s+(\d+)\s+CPU\s+0:[\s\S]+?DEVICE_NAME\s+:\s+([\w\d-]+)[\s\S]+?DEVICE_SERIAL_NUMBER\s+:\s+([\w\d]+)[\s\S]+?VENDOR_NAME\s+:\s+([\w\d-]+)[\s\S]+?'
+            matches = re.findall(regex, retText)
+            for match in matches:
+                ret[match[2]]={
+                    "slot_num":match[0],
+                    "device_sn":match[2],
+                    "brand":match[3],
+                    "model":match[1],
+                   "chassis_num":-1,
+                }
+
+
         self.data['device_list']=ret
         return  ret
             
 
     def queryAllPortVlan(self):
-      logicPortList=  self.queryLogicPortList()   
-      portList=  self.queryPortList()   
+      self.data['logic_port_list']=logicPortList=  self.queryLogicPortList()   
+      self.data['port_list']=portList= self.queryPortList()   
       self.data['port_vlan_list']=self.queryPortVlan(portList)
       self.data['port_vlan_list'].update(self.queryPortVlan(logicPortList))
       return self.data['port_vlan_list']
 
     def queryPortVlan(self,portNameList):
         ret={}
+        
         for port_name in portNameList:
                 portVlan=[]
-         
-                portVlanTxt=self.client.send_command(f'display interface {port_name} | include VLAN')
+                time.sleep(0.1)
+                portVlanTxt=self.client.send_command(f'display interface {port_name} | include VLAN',expect_string=self.prompt, read_timeout=10)
                 portVlanLines=portVlanTxt.split("\n")
                 for portVlanline in portVlanLines:
                     # portVlanline='VLAN permitted: 1(default vlan), 2-12,8888,9000'
                     if 'VLAN permitted:' in portVlanline  :
                             text = re.sub(r'\([^)]*\)', '', portVlanline)
-                            # 使用正则表达式匹配数字和范围
                             match = re.search(r"(?<=permitted: ).*$", text)
                             vlan_list = match.group(0).split(",")
                             for vlanNumStr in vlan_list:
@@ -202,23 +219,19 @@ class H3C:
                     'crc_count':tmpCount,
                 }
             )
-
+        self.data['crc_list']=ret
         return ret            
 
-    #获取物理端口列表 
     def queryPortList(self):   
         ret={}
         cmdPort='display interface brief '
         resultTxt=self.client.send_command(cmdPort)
         lines = resultTxt.split("\n")
-        # 遍历输出行
         regPort = r"(GE|XGE|FE|E0|E2|E1|E3|E4|40GE)([0-9\/]{2,})"
         patternPort = re.compile(regPort, re.M )
         for line in lines:
-                # 跳过标题行
             if 'BAGG'  in line or 'Trunk'  in line  or 'MGE' in line:
                 continue
-            # 拆分行并获取端口名称、状态、速率、协商速率和链接类型
             serObjPort= re.search(patternPort, line)
             if serObjPort and serObjPort.group(1) and serObjPort.group(2):
                 parts = line.split()
@@ -232,11 +245,7 @@ class H3C:
                     port_desc=parts[6]
                 else:
                     port_desc=''
-                # 获取MAC地址 这个是对端的mac地址
-                # mac_output = self.client.send_command(f'display interface {port_name} | include hardware address')
-                # mac_lines = mac_output.split('\n')
-                # mac_address = mac_lines[2].split()[1]
-                # 将端口信息存储在字典中，以端口名称为键
+                
                 ret[port_name] = {
                     'port_link_status': port_link_status,
                     'speed': port_speed,
@@ -252,7 +261,7 @@ class H3C:
         ret =''
         cmd='disp version | include Software'
         retText = self.client.send_command(cmd)
-        retText = retText.replace('"', '') # 去除双引号
+        retText = retText.replace('"', '') 
         reg = r"Comware Software, ([a-zA-Z0-9., ]*)"
         pattern = re.compile(reg, re.M | re.I)
         serObj = re.search(pattern, retText)
@@ -274,10 +283,8 @@ class H3C:
         cmdPort='display interface brief '
         resultTxt=self.client.send_command(cmdPort)
         lines = resultTxt.split("\n")
-        # 遍历输出行
 
         for line in lines:
-                # 跳过标题行
             if 'BAGG' not in line and 'Trunk' not in line :
                 continue
             parts = line.split()
@@ -291,11 +298,7 @@ class H3C:
                 port_desc=parts[6]
             else:
                 port_desc=''
-            # 获取MAC地址 这个是对端的mac地址
-            # mac_output = self.client.send_command(f'display interface {port_name} | include hardware address')
-            # mac_lines = mac_output.split('\n')
-            # mac_address = mac_lines[2].split()[1]
-            # 将端口信息存储在字典中，以端口名称为键
+           
             ret[port_name] = {
                 'port_link_status': port_link_status,
                 'speed': port_speed,
@@ -338,10 +341,62 @@ class H3C:
         self.data['composed_logic_port']=ret
         return ret            
 
+    def queryArpList(self):
+        cmd='disp arp'
+        resultTxt = self.client.send_command(cmd)
+        lines = resultTxt.split("\n")
+        for line in lines:
+            if 'Type:' in line or 'IP address' in line:
+                continue
+            parts = line.split()
+            if len(parts)>5:
+                self.data['arp_list'].append({
+                    'ip': parts[0],
+                    'mac': parts[1],
+                    'port_name': parts[3],
+                })
+        return self.data['arp_list']
+    
+    def queryMacAddressList(self):
+        cmd='disp mac-address'
+        resultTxt = self.client.send_command(cmd)
+        lines = resultTxt.split("\n")
+        for line in lines:
+            if 'MAC Address' in line or 'BAGG' in line or 'Trunk'  in line  or 'MGE' in line:
+                continue
+            parts = line.split()
+            if len(parts)>3:
+                self.data['port_connect_mac_list'].append({
+                    'con_mac_address': parts[0],
+                    'local_port': parts[3],
+                })
+        return self.data['port_connect_mac_list']
+    
+    def queryLLdpNeighborInfoList(self):
+        cmd='disp lldp neighbor list'
+        resultTxt = self.client.send_command(cmd)
+        lines = resultTxt.split("\n")
+        valFlag=False
+        pattern = r'(\S+)\s+(\S+)\s+(\S+)\s+(.*)'
+        for line in lines:
+            if 'Port ID' in line and 'Local Interface' in line :
+                valFlag=True
+                continue
+            if valFlag==False:
+                continue
+            match = re.match(pattern, line)
+            if match:
+                self.data['lldp_neighbor_info_list'][match.group(1)]={
+                    'chassis_id': match.group(2),
+                    'port_id': match.group(3),
+                    'system_name': match.group(4).strip(), 
+                }
+        return self.data['lldp_neighbor_info_list']
+
 if __name__ == '__main__':
     try:
         obj = H3C()
-        obj.run_command('mkdir -p /var/log/ihm/')
+        obj.run_command('mkdir -p /var/log/switchAuto/')
         t = time.time()
         timenow = (int(t))   
         obj.exeLog = '/var/log/ihm/swithc-query-{0}-{1}.log'.format(datetime.date.today(),timenow)
@@ -351,7 +406,8 @@ if __name__ == '__main__':
                     format=
                     '%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s'
                     )
-        # xxx.sh 192.168.1.1  test testpwd 22 queryLogicPort
+        obj.init_log_done=True
+        # xxx.sh 192.168.1.1  test testpwd 23 queryLogicPort
         obj.ip = sys.argv[1]
         obj.username = sys.argv[2]
         obj.password = sys.argv[3]
@@ -360,21 +416,38 @@ if __name__ == '__main__':
         obj.initClient()
         ret = ''
         if obj.funcName == 'queryComposedLogicPort':
-            ret = obj.buildReponse(True,obj.queryComposedLogicPort())
+            obj.queryComposedLogicPort()
+            ret = obj.buildReponse(True,obj.data)   
         elif obj.funcName =='queryAllPortCRCCount':
-            ret = obj.buildReponse(True,obj.queryAllPortCRCCount())
+            obj.queryAllPortCRCCount()
+            ret = obj.buildReponse(True,obj.data)   
         elif obj.funcName =='queryDeviceManuinfo':
-            ret = obj.buildReponse(True,obj.queryDeviceManuinfo())            
+            obj.queryDeviceManuinfo()
+            ret = obj.buildReponse(True,obj.data)           
         elif obj.funcName =='queryPortList':
-            ret = obj.buildReponse(True,obj.queryPortList())
+            obj.queryPortList()
+            ret = obj.buildReponse(True,obj.data)   
         elif obj.funcName =='queryHostName':
-            ret = obj.buildReponse(True,obj.queryHostName())
+            obj.queryHostName()
+            ret = obj.buildReponse(True,obj.data)   
         elif obj.funcName =='queryOsVersion':
-            ret = obj.buildReponse(True,obj.queryOsVersion())            
+            obj.queryOsVersion()
+            ret = obj.buildReponse(True,obj.data)          
         elif obj.funcName =='queryLogicPortList':
-            ret = obj.buildReponse(True,obj.queryLogicPortList())     
+            obj.queryLogicPortList()
+            ret = obj.buildReponse(True,obj.data) 
         elif obj.funcName =='queryAllPortVlan':
-            ret = obj.buildReponse(True,obj.queryAllPortVlan()) 
+            obj.queryAllPortVlan()
+            ret = obj.buildReponse(True,obj.data)
+        elif obj.funcName =='queryArpList':
+            obj.queryArpList()
+            ret = obj.buildReponse(True,obj.data)
+        elif obj.funcName =='queryMacAddressList':
+            obj.queryMacAddressList()
+            ret = obj.buildReponse(True,obj.data)
+        elif obj.funcName =='queryLLdpNeighborInfoList':
+            obj.queryLLdpNeighborInfoList()
+            ret = obj.buildReponse(True,obj.data)
         elif obj.funcName =='queryBaseInfo':
             obj.queryHostName()
             obj.queryDeviceManuinfo()
@@ -382,7 +455,7 @@ if __name__ == '__main__':
             obj.queryPortList()
             obj.queryLogicPortList()
             obj.queryComposedLogicPort()
-            ret = obj.data                                                
+            ret = obj.buildReponse(True,obj.data)                                             
         else:
             ret = obj.buildReponse(False,'unknown function '+sys.argv[5])
         tmpJson = json.dumps(ret)
@@ -397,4 +470,8 @@ if __name__ == '__main__':
         ret = obj.buildReponse(False,msg)
         obj.outJson(json.dumps(ret))
     obj.closeClient()
-    os._exit(0) 
+    os._exit(0)```
+
+
+
+
